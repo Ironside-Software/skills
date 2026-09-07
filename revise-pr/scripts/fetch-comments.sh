@@ -9,6 +9,8 @@
 #   item.kind = "review"  top-level review body with actionable text, human authors only;
 #     reply with `reply.sh --pr <pr.url> --review <id>` — the --review tag marks it answered so a
 #     rerun does not re-surface it (PullRequestReview has no resolved state of its own).
+#   item.kind = "ci"  present only when a required check is failing; no thread to reply to, .checks
+#     carries the failing check names/links for diagnosis. Not affected by truncation.
 # Skipped: resolved threads, reviews with no non-whitespace body, bot-authored reviews (their own
 # summaries/walkthroughs, not requests), review items already tagged as answered.
 # ponytail: reviewThreads/comments/reviews/issue-comments are capped (100/20/50/100) with no
@@ -45,7 +47,10 @@ truncated=$(jq '[.data.repository.pullRequest
     (.reviewThreads.nodes[].comments.pageInfo.hasNextPage)] | any' <<<"$raw")
 [ "$truncated" = true ] && echo "warning: hit a pagination cap, output is incomplete (see script header)" >&2
 
-jq -n --argjson pr "$pr" --argjson raw "$raw" --argjson truncated "$truncated" '
+checks=$(gh pr checks "$number" -R "$owner/$repo" --json name,state,link,description 2>/dev/null || echo '[]')
+failing=$(jq '[.[] | select(.state == "FAILURE" or .state == "ERROR")]' <<<"$checks")
+
+jq -n --argjson pr "$pr" --argjson raw "$raw" --argjson truncated "$truncated" --argjson failing "$failing" '
   ($raw.data.repository.pullRequest) as $p
   | ($p.comments.nodes | map(.body // "") | join("\n")) as $issueBody
   | {
@@ -68,6 +73,12 @@ jq -n --argjson pr "$pr" --argjson raw "$raw" --argjson truncated "$truncated" '
                    and .author.__typename != "Bot"
                    and ($issueBody | test("revise-pr:review:" + $r.id) | not))
           | { kind: "review", id, author: .author.login, bot: false, state, url, body }
-        ]
+        ] +
+        ( if ($failing | length) > 0 then
+            [ { kind: "ci", id: "ci", author: "CI", bot: false,
+                body: ("Failing checks: " + ([$failing[].name] | join(", "))),
+                checks: $failing } ]
+          else [] end
+        )
       )
     }'

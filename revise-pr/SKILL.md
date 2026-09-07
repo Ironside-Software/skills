@@ -58,6 +58,7 @@ Output is JSON: `.pr` (number, url, headRefName, baseRefName, reviewDecision), `
 
 - `kind: "thread"` — inline thread, unresolved. `id` is what `reply.sh --thread` takes. `author`/`body` are the most recent comment — what's owed a reply; `comments[]` carries the full thread (each with `author`, `bot`, `body`) for context. Also carries `path`, `line`, `outdated`, `diffHunk`. `bot` is true only when every comment in the thread is bot-authored — one human reply flips it false, so a bot-opened thread a human joined is treated as human.
 - `kind: "review"` — top-level review body with actionable text, human authors only. Reply with `reply.sh --pr <pr.url> --review <id>` — the `--review` tag marks it answered so a rerun won't re-surface it.
+- `kind: "ci"` — present only when a check is currently failing. `checks[]` carries the failing check names, states, and links. No thread to reply to and nothing to post — treat it as a fix-only row (see steps 2–5).
 
 Already filtered out: resolved threads, reviews with no non-whitespace body, bot-authored reviews (their own walkthroughs/summaries, not requests), review items already tagged answered. Bot inline threads (`bot: true` — CodeRabbit, Copilot, Claude, Sourcery, …) are real feedback and stay in. Outdated threads stay in — the reviewer has not closed them.
 
@@ -75,6 +76,8 @@ Record a verdict:
 - **Invalid** — the claim does not hold: reviewer misread the code, the case is already handled, or the suggested change would introduce a bug. Cite the line that disproves it.
 - **Unclear** — the request is ambiguous, or it is a preference rather than a defect.
 
+For `kind: "ci"`: always **valid** — a failing check is a failing check, not a claim to dispute. Open the failing check's `link` (or run the equivalent command locally — test/lint/build, whatever the check runs) to find the actual cause before recommending a fix.
+
 ### 3. Recommend — and stop for the user's decision
 
 Map verdict to a recommended action:
@@ -82,6 +85,7 @@ Map verdict to a recommended action:
 - **Valid** → **fix**. "nit" and "optional" included.
 - **Invalid** → **push back**, with the disproving evidence as the reason.
 - **Unclear**, human author → **ask**. `bot: true` → **fix** with your best reading if cheap, otherwise **push back** — a bot will not answer a question.
+- `kind: "ci"` → always **fix**. Row still shows in the table for visibility and can still be reclassified or dropped there (e.g. known-flaky check) — it just isn't asked about separately up front.
 
 Several comments asking for the same thing are one fix; note the duplicates.
 
@@ -95,7 +99,7 @@ The user accepts, reclassifies rows, or drops rows. Apply their decisions to the
 
 ### 4. Apply fixes
 
-Make every **fix** change. Then run whatever the repo uses to verify — test, lint, typecheck — using the repo's own commands (`package.json` scripts, `Makefile`, CI config). A fix that breaks the suite is not done.
+Make every **fix** change, including `kind: "ci"` rows. Then run whatever the repo uses to verify — test, lint, typecheck — using the repo's own commands (`package.json` scripts, `Makefile`, CI config). A fix that breaks the suite is not done, and a CI fix must reproduce the original failure locally and pass before it counts as fixed.
 
 Commit with a message naming what feedback it addresses, e.g. `Address review: validate input before parse`. One commit for the batch is fine; split only when fixes touch unrelated areas. New commits only — no amend, no force-push — so reviewers see what changed since their last look.
 
@@ -114,6 +118,8 @@ Print them grouped by action:
 - **Push back** — evidence from step 2 first, then the outcome, then the exit.
 - **Ask** — the question, one sentence, the readings you are choosing between.
 
+`kind: "ci"` rows have no thread or review to reply to — list them under **Fix** with what changed and the commit SHA like any other fix, but skip the dry-run/reply.sh call for that row.
+
 Wait for the user to approve, edit, or drop replies. Nothing has left the machine yet: the commit is local and no reply has been posted. The dry-run output is byte-for-byte what step 6 posts.
 
 ### 6. Push and reply
@@ -128,4 +134,4 @@ Multi-line body: pass `-` and feed it on stdin. Leave threads open — resolving
 
 ### 7. Report
 
-Print the final table with reply URLs and the result of `gh pr checks <pr.url>` once CI has started. State plainly which threads were fixed, pushed back, or asked — and anything that could not be addressed.
+Print the final table with reply URLs and the result of `gh pr checks <pr.url>` once CI has started. State plainly which threads were fixed, pushed back, or asked — and anything that could not be addressed. If the `kind: "ci"` row's fix didn't actually turn the check green (new failure, flaky rerun), say so explicitly rather than letting the table show it as fixed.
