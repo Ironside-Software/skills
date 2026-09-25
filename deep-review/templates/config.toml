@@ -1,0 +1,38 @@
+# deep-review configuration for this repository. Commit it: the whole team gets the same review.
+# Reference: <skill>/core/configuration.md · validate: scripts/doctor.sh · inspect: scripts/config.sh explain
+version = 1
+
+[checks]
+# Every disable needs a reason; safety checks also need acknowledge-risk = true.
+disable = [
+#   { id = "C-LARGE-MIXED-FILE", reason = "…" },
+]
+# Opt-in checks (default off). Uncomment what this team wants:
+enable = [
+{{OPT_IN_CHECKS}}
+]
+
+[severity]
+# "C-UNSYNCED-CONTRACT" = "correctness"
+
+[packs]
+disable = []   # detected packs you do not want
+force = []     # packs detection cannot see
+
+# [passes.duplication]
+# paths-ignore = ["legacy/**"]
+
+# [thresholds]
+# subagent-min-files = 30
+
+# [output]
+# path = "REVIEW.md"
+
+# [[overrides]]
+# paths = ["tools/**"]
+# checks.disable = [{ id = "C-UNTESTED-BRANCH", reason = "one-off scripts" }]
+
+# [[accepted]]
+# fingerprint = "<check-id>:<path>:<symbol>"
+# reason = "…"
+# until = 2027-01-01
