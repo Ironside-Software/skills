@@ -5,7 +5,7 @@ description: Address review feedback on a pull request — fetch every unresolve
 
 # /revise-pr
 
-Turn reviewer feedback on a PR into commits and threaded replies. Every unresolved thread ends the run either **fixed** (code changed, replied with commit), **pushed back** (replied with reasoning, left open), or **asked** (replied with a clarifying question, left open). None silently skipped. The user decides twice: which action each comment gets, and whether the drafted replies go out.
+Turn reviewer feedback on a PR into commits and threaded replies. Every unresolved thread ends the run either **fixed** (code changed, replied with commit), **pushed back** (replied with reasoning), or **asked** (replied with a clarifying question). Which of them also get resolved is the user's `resolve` preference; asked threads never are. None silently skipped. The user decides twice: which action each comment gets, and whether the drafted replies go out.
 
 All GitHub API calls go through `scripts/` (bash, `gh`, `jq`). Call them by absolute path from the repository being revised — with no argument, `gh` resolves the PR from the checked-out branch of the current directory.
 
@@ -20,7 +20,7 @@ All GitHub API calls go through `scripts/` (bash, `gh`, `jq`). Call them by abso
 
 ## Preferences
 
-Two per-user settings, asked once on first run, stored as plain-text files in `~/.config/revise-pr/` (`signature`, `style`), managed by `scripts/config.sh get|set <key>`. Exit 3 from `get` means not configured yet. To change later: `config.sh set` again, or delete the file.
+Three per-user settings, asked once on first run, stored as plain-text files in `~/.config/revise-pr/` (`signature`, `style`, `resolve`), managed by `scripts/config.sh get|set <key>`. Exit 3 from `get` means not configured yet. To change later: `config.sh set` again, or delete the file.
 
 **Signature** — appended by `reply.sh` as the last line of every reply, blank line before, so reviewers know the reply was written with an agent. First-run prompt: "Sign posted replies with what? (e.g. `— Abdolah, via Claude`; `none` posts unsigned)". `none` saves empty; empty means declined, post unsigned, never ask again.
 
@@ -33,6 +33,14 @@ Two per-user settings, asked once on first run, stored as plain-text files in `~
 - `formal` — full sentences, no contractions, thanks the reviewer.
 - `match` — mirror the length and tone of the comment being answered.
 
+**Resolve** — which threads the run resolves after replying. First-run prompt: "Resolve threads after replying? `never` (recommended: resolving is the reviewer's acknowledgement), `fixed`, or `handled`".
+
+- `never` — leave every thread open.
+- `fixed` — resolve threads whose fix landed.
+- `handled` — also resolve bot threads that were pushed back: a bot never closes its own thread, so the reply is the last word.
+
+Asked threads and push-backs on human threads stay open under every setting. `post-replies.sh` applies the rule, so the agent never decides it per thread.
+
 Regardless of style: bots always get `terse` — nobody reads a Copilot thread warmly. Push-backs lead with the evidence (file:line, what it proves), then the outcome, then an exit ("say if you want it anyway").
 
 ## Steps
@@ -42,9 +50,10 @@ Regardless of style: bots always get `terse` — nobody reads a Copilot thread w
 ```bash
 scripts/config.sh get signature
 scripts/config.sh get style
+scripts/config.sh get resolve
 ```
 
-Exit 3 on either → run its first-run prompt above and `config.sh set <key> <value>` before anything else.
+Exit 3 on any → run its first-run prompt above and `config.sh set <key> <value>` before anything else.
 
 ### 1. Fetch every comment
 
@@ -52,19 +61,21 @@ Exit 3 on either → run its first-run prompt above and `config.sh set <key> <va
 scripts/fetch-comments.sh [<number>|<url>|<branch>]   # no argument: PR of the checked-out branch
 ```
 
+Add `--text` (before the PR argument) for a readable dump of the same items, one block per item with every comment body in full — use it to read the feedback, and the JSON for ids and fields.
+
 Run it from the repository root. With no argument and no PR on the current branch it exits 1 with `no pull requests found for branch "<name>"` — report that and stop.
 
 Output is JSON: `.pr` (number, url, headRefName, baseRefName, reviewDecision), `.truncated` (bool), and `.items[]`:
 
-- `kind: "thread"` — inline thread, unresolved. `id` is what `reply.sh --thread` takes. `author`/`body` are the most recent comment — what's owed a reply; `comments[]` carries the full thread (each with `author`, `bot`, `body`) for context. Also carries `path`, `line`, `outdated`, `diffHunk`. `bot` is true only when every comment in the thread is bot-authored — one human reply flips it false, so a bot-opened thread a human joined is treated as human.
-- `kind: "review"` — top-level review body with actionable text, human authors only. Reply with `reply.sh --pr <pr.url> --review <id>` — the `--review` tag marks it answered so a rerun won't re-surface it.
+- `kind: "thread"` — inline thread, unresolved. `id` goes into the replies file as `thread`. `author`/`body` are the most recent comment — what's owed a reply; `comments[]` carries the full thread (each with `author`, `bot`, `body`) for context. Also carries `path`, `line`, `outdated`, `diffHunk`. `bot` is true only when every comment in the thread is bot-authored — one human reply flips it false, so a bot-opened thread a human joined is treated as human.
+- `kind: "review"` — top-level review body with actionable text, human authors only. Its `id` goes into the replies file as `review`, next to `pr: <pr.url>` — the posted reply carries a tag that marks it answered, so a rerun won't re-surface it.
 - `kind: "ci"` — present only when a check is currently failing. `checks[]` carries the failing check names, states, and links. No thread to reply to and nothing to post — treat it as a fix-only row (see steps 2–5).
 
 Already filtered out: resolved threads, reviews with no non-whitespace body, bot-authored reviews (their own walkthroughs/summaries, not requests), review items already tagged answered. Bot inline threads (`bot: true` — CodeRabbit, Copilot, Claude, Sourcery, …) are real feedback and stay in. Outdated threads stay in — the reviewer has not closed them.
 
 If `.truncated` is true, a pagination cap was hit and the listing is incomplete — say so and stop rather than reporting a partial run as complete.
 
-Stop if the working tree is dirty (`git status --porcelain`) — check before touching the branch; stashing someone's uncommitted work is not this skill's job. Then check out the PR with `gh pr checkout <pr.number>` if not already on it — it handles same-repo and fork branches, unlike a plain `git checkout <branch>`.
+If the current branch is not the PR's `headRefName`, check out the PR with `gh pr checkout <pr.number>` — it handles same-repo and fork branches, unlike a plain `git checkout <branch>`. Stop instead if the working tree is dirty (`git status --porcelain`): stashing someone's uncommitted work is not this skill's job. Already on the PR branch with unrelated local changes, carry on and leave them alone — step 4 stages only the files its fixes touch.
 
 ### 2. Validate each comment
 
@@ -101,16 +112,24 @@ The user accepts, reclassifies rows, or drops rows. Apply their decisions to the
 
 Make every **fix** change, including `kind: "ci"` rows. Then run whatever the repo uses to verify — test, lint, typecheck — using the repo's own commands (`package.json` scripts, `Makefile`, CI config). A fix that breaks the suite is not done, and a CI fix must reproduce the original failure locally and pass before it counts as fixed.
 
-Commit with a message naming what feedback it addresses, e.g. `Address review: validate input before parse`. One commit for the batch is fine; split only when fixes touch unrelated areas. New commits only — no amend, no force-push — so reviewers see what changed since their last look.
+Stage the files the fixes touched by explicit path — never `git add -A`, `git add .` or `git commit -a`, which would sweep up unrelated local changes. Commit with a message naming what feedback it addresses, e.g. `Address review: validate input before parse`. One commit for the batch is fine; split only when fixes touch unrelated areas. New commits only — no amend, no force-push — so reviewers see what changed since their last look.
 
 ### 5. Preview replies — and stop again
 
-Draft one reply per item in the configured style and render each with the signature exactly as it will be posted:
+Draft one reply per item in the configured style, all into one JSON file, and render it exactly as it will be posted:
+
+```json
+[
+  {"thread": "PRRT_xxx", "action": "fix", "bot": true, "body": "Fixed in `abc123`."},
+  {"pr": "<pr.url>", "review": "PRR_xxx", "action": "pushback", "bot": false, "body": "..."}
+]
+```
 
 ```bash
-scripts/reply.sh --dry-run --thread <id> 'BODY'                       # kind: "thread"
-scripts/reply.sh --dry-run --pr <pr.url> --review <id> 'BODY'         # kind: "review"
+scripts/post-replies.sh --dry-run /tmp/revise-pr-<pr.number>.json
 ```
+
+`action` is the row's decision from step 3 (`fix`, `pushback`, `ask`) and `bot` is the item's `bot` field. Each reply is printed with its signature and whether it will be resolved. Bodies are JSON strings, so multi-line replies need no quoting.
 
 Print them grouped by action:
 
@@ -118,20 +137,19 @@ Print them grouped by action:
 - **Push back** — evidence from step 2 first, then the outcome, then the exit.
 - **Ask** — the question, one sentence, the readings you are choosing between.
 
-`kind: "ci"` rows have no thread or review to reply to — list them under **Fix** with what changed and the commit SHA like any other fix, but skip the dry-run/reply.sh call for that row.
+`kind: "ci"` rows have no thread or review to reply to — list them under **Fix** with what changed and the commit SHA like any other fix, but leave them out of the replies file.
 
-Wait for the user to approve, edit, or drop replies. Nothing has left the machine yet: the commit is local and no reply has been posted. The dry-run output is byte-for-byte what step 6 posts.
+Wait for the user to approve, edit, or drop replies; apply their edits to the file and dry-run it again. Nothing has left the machine yet: the commit is local and no reply has been posted. Step 6 posts that same file, so the dry-run output is byte-for-byte what goes out.
 
 ### 6. Push and reply
 
 ```bash
 git push
-scripts/reply.sh --thread <id> 'BODY'                     # inline thread → prints comment URL
-scripts/reply.sh --pr <pr.url> --review <id> 'BODY'        # top-level review → prints comment URL
+scripts/post-replies.sh /tmp/revise-pr-<pr.number>.json   # prints "<id> <comment url> [resolved]" per reply
 ```
 
-Multi-line body: pass `-` and feed it on stdin. Leave threads open — resolving is the reviewer's acknowledgement.
+It stops at the first failure after printing what was already posted; drop those entries from the file before rerunning. `scripts/reply.sh` and `scripts/resolve.sh` post or resolve a single thread when one reply needs redoing.
 
 ### 7. Report
 
-Print the final table with reply URLs and the result of `gh pr checks <pr.url>` once CI has started. State plainly which threads were fixed, pushed back, or asked — and anything that could not be addressed. If the `kind: "ci"` row's fix didn't actually turn the check green (new failure, flaky rerun), say so explicitly rather than letting the table show it as fixed.
+Print the final table with reply URLs and the result of `gh pr checks <pr.url>` once CI has started. State plainly which threads were fixed, pushed back, or asked, and which were resolved — and anything that could not be addressed. If the `kind: "ci"` row's fix didn't actually turn the check green (new failure, flaky rerun), say so explicitly rather than letting the table show it as fixed.

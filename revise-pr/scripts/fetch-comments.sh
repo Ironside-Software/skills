@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fetch every actionable, unresolved review comment on a PR as JSON.
-#   fetch-comments.sh [<number>|<url>|<branch>] [extra gh pr view args, e.g. -R owner/repo]
+#   fetch-comments.sh [--text] [<number>|<url>|<branch>] [extra gh pr view args, e.g. -R owner/repo]
+# --text prints the same items for reading (full comment bodies, one block per item) instead of JSON.
 # Run with no argument from the repo whose checked-out branch has the PR.
 # Output: {pr:{number,url,title,headRefName,baseRefName,reviewDecision}, truncated:bool, items:[...]}
 #   item.kind = "thread"  inline; reply with `reply.sh --thread <id>`.
@@ -17,6 +18,9 @@
 # pagination; `truncated:true` + a stderr warning fire instead of silently dropping — add
 # `gh api graphql --paginate` if a PR blows past that.
 set -euo pipefail
+
+text=0
+[ "${1:-}" = --text ] && { text=1; shift; }
 
 pr=$(gh pr view "$@" --json number,url,title,headRefName,baseRefName,reviewDecision)
 url=$(jq -r .url <<<"$pr")
@@ -50,7 +54,7 @@ truncated=$(jq '[.data.repository.pullRequest
 checks=$(gh pr checks "$number" -R "$owner/$repo" --json name,state,link,description 2>/dev/null || echo '[]')
 failing=$(jq '[.[] | select(.state == "FAILURE" or .state == "ERROR")]' <<<"$checks")
 
-jq -n --argjson pr "$pr" --argjson raw "$raw" --argjson truncated "$truncated" --argjson failing "$failing" '
+out=$(jq -n --argjson pr "$pr" --argjson raw "$raw" --argjson truncated "$truncated" --argjson failing "$failing" '
   ($raw.data.repository.pullRequest) as $p
   | ($p.comments.nodes | map(.body // "") | join("\n")) as $issueBody
   | {
@@ -81,4 +85,17 @@ jq -n --argjson pr "$pr" --argjson raw "$raw" --argjson truncated "$truncated" -
           else [] end
         )
       )
-    }'
+    }')
+
+if [ "$text" = 0 ]; then printf '%s\n' "$out"; exit 0; fi
+jq -r '
+  "PR #\(.pr.number) \(.pr.title)\n\(.pr.url)\(if .truncated then "\nWARNING: truncated, listing is incomplete" else "" end)\n",
+  (.items | to_entries[] | .key as $i | .value
+    | "=== #\($i + 1) \(.kind) \(.id)"
+      + (if .path then "  \(.path):\(.line // "?")" else "" end)
+      + (if .bot then "  [bot]" else "" end)
+      + (if .outdated then "  [outdated]" else "" end),
+      (if .kind == "thread" then (.comments[] | "[\(.author)] \(.body)\n")
+       elif .kind == "ci" then (.checks[] | "\(.name): \(.state) \(.link // "")")
+       else "[\(.author)] \(.body)\n" end))
+' <<<"$out"
