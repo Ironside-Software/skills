@@ -16,6 +16,7 @@ while [ $# -gt 0 ]; do
     --thread)  thread="$2"; shift 2 ;;
     --pr)      pr="$2"; shift 2 ;;
     --review)  review="$2"; shift 2 ;;
+    -) args+=("$1"); shift ;;
     -*) echo "unknown flag: $1" >&2; usage; exit 2 ;;
     *) args+=("$1"); shift ;;
   esac
